@@ -7,18 +7,16 @@ export default {
     if (!msg?.chat?.id) return new Response("OK", { status: 200 });
 
     // --------------------------
-    // НАСТРОЙКИ ТЕМ (как в main.py)
+    // НАСТРОЙКИ ТЕМ (вставь свои)
     // --------------------------
     const BALANCE_THREAD_ID = 45; // тема "Баланс"
-    const FOOD_THREAD_ID = 33;    // тема "Еда" (отдельный бюджет)
-    const APART_THREAD_ID = 78;   // тема "Квартира" (уменьшает общий)
-    const TOPUP_THREAD_ID = 80;   // тема "Пополнение" (увеличивает общий)
-
-    // Другие темы, где расходы уменьшают общий (например: Путешествия, Для нас)
-    const GENERAL_EXPENSE_THREADS = new Set([34, 43]);
+    const FOOD_THREAD_ID = 33;    // тема "Еда"
+    const APART_THREAD_ID = 78;   // тема "Квартира"
+    const TOPUP_THREAD_ID = 80;   // тема "Пополнение"
+    const GENERAL_EXPENSE_THREADS = new Set([34, 43]); // Путешествия, Для нас и т.п.
 
     // --------------------------
-    // HELPERS (аналог util из main.py)
+    // HELPERS
     // --------------------------
     const chatId = msg.chat.id;
     const threadId = msg.message_thread_id ?? null;
@@ -57,12 +55,12 @@ export default {
       const centsSigned = toCentsSigned(amountStr);
       const abs = Math.abs(centsSigned);
       if (!abs) return null;
-      const sign = centsSigned < 0 ? -1 : 1; // как в main.py
+      const sign = centsSigned < 0 ? -1 : 1;
       return { amount_abs: abs, note, sign };
     };
 
     const tg = async (method, body) => {
-      if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN missing (Cloudflare → Settings → Variables → Secret)");
+      if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN missing");
       const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -74,15 +72,16 @@ export default {
     };
 
     // --------------------------
-    // KV storage (аналог sqlite state + entries)
+    // KV storage (state + entries)
     // --------------------------
-    const kState = `state:${chatId}`;     // JSON: { total_cents, food_cents, balance_message_id }
-    const kEntries = `entries:${chatId}`; // JSON array последних записей
+    const kState = `state:${chatId}`; // JSON: { total_cents, food_cents }
+    const kEntries = `entries:${chatId}`; // last N
 
     const getState = async () => {
       const raw = await env.KV.get(kState);
       if (!raw) {
-        const init = { total_cents: 0, food_cents: 2000000, balance_message_id: null }; // 20000.00
+        // ВАЖНО: еда по умолчанию = 0 (ты задаёшь сам)
+        const init = { total_cents: 0, food_cents: 0 };
         await env.KV.put(kState, JSON.stringify(init));
         return init;
       }
@@ -90,11 +89,10 @@ export default {
         const st = JSON.parse(raw);
         return {
           total_cents: Number(st.total_cents ?? 0),
-          food_cents: Number(st.food_cents ?? 2000000),
-          balance_message_id: st.balance_message_id ? Number(st.balance_message_id) : null,
+          food_cents: Number(st.food_cents ?? 0),
         };
       } catch {
-        const init = { total_cents: 0, food_cents: 2000000, balance_message_id: null };
+        const init = { total_cents: 0, food_cents: 0 };
         await env.KV.put(kState, JSON.stringify(init));
         return init;
       }
@@ -111,44 +109,28 @@ export default {
       await env.KV.put(kEntries, JSON.stringify(arr));
     };
 
-    const buildBalanceText = (total_cents, food_cents, last_line = null) => {
+    const buildBalanceText = (st, lastLine = null) => {
       let base =
         `📌 <b>Баланс</b>\n` +
-        `💰 <b>Общий:</b> ${money(total_cents)}\n` +
-        `🍽 <b>Еда:</b> ${money(food_cents)} \n` +
+        `💰 <b>Общий:</b> ${money(st.total_cents)}\n` +
+        `🍽 <b>Еда:</b> ${money(st.food_cents)}\n` +
         `🕒 ${nowStr()}`;
-      if (last_line) base += `\n\n${last_line}`;
+      if (lastLine) base += `\n\n${lastLine}`;
       return base;
     };
 
-    const updateBalanceMessage = async (st, textHtml) => {
-      // как в main.py: edit если есть msg_id, иначе send и запомнить
-      if (st.balance_message_id) {
-        try {
-          await tg("editMessageText", {
-            chat_id: chatId,
-            message_id: st.balance_message_id,
-            message_thread_id: BALANCE_THREAD_ID,
-            text: textHtml,
-            parse_mode: "HTML",
-          });
-          return;
-        } catch (_) {
-          // fall through
-        }
-      }
-      const sent = await tg("sendMessage", {
+    // ВАЖНО: теперь ВСЕГДА создаём новое сообщение в теме Баланс (НЕ edit)
+    const postBalance = async (textHtml) => {
+      await tg("sendMessage", {
         chat_id: chatId,
         message_thread_id: BALANCE_THREAD_ID,
         text: textHtml,
         parse_mode: "HTML",
       });
-      st.balance_message_id = sent.message_id;
-      await saveState(st);
     };
 
     // --------------------------
-    // COMMANDS (как в main.py)
+    // COMMANDS
     // --------------------------
     if (text === "/where") {
       await tg("sendMessage", {
@@ -165,11 +147,9 @@ export default {
         message_thread_id: threadId ?? undefined,
         text:
           "Я бот учёта по темам.\n\n" +
-          "Темы:\n" +
           "🍽 Еда — отдельный бюджет, общий не трогает\n" +
           "🏠 Квартира — расход, уменьшает общий\n" +
-          "➕ Пополнение — доход, увеличивает общий\n" +
-          "Другие отмеченные темы — расходы, уменьшают общий\n\n" +
+          "➕ Пополнение — доход, увеличивает общий\n\n" +
           "Команды (пиши в теме Баланс):\n" +
           "/settotal 50000.00\n" +
           "/setfood 20000.00\n\n" +
@@ -180,11 +160,7 @@ export default {
 
     if (text.startsWith("/settotal")) {
       if (threadId !== BALANCE_THREAD_ID) {
-        await tg("sendMessage", {
-          chat_id: chatId,
-          message_thread_id: threadId ?? undefined,
-          text: "Команду /settotal пиши в теме 'Баланс'.",
-        });
+        await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId ?? undefined, text: "Команду /settotal пиши в теме 'Баланс'." });
         return new Response("OK", { status: 200 });
       }
       const parts = text.split(/\s+/, 2);
@@ -200,18 +176,15 @@ export default {
       const st = await getState();
       st.total_cents = cents;
       await saveState(st);
-      await updateBalanceMessage(st, buildBalanceText(st.total_cents, st.food_cents, "✅ Установлен общий баланс."));
-      await tg("sendMessage", { chat_id: chatId, message_thread_id: BALANCE_THREAD_ID, text: "✅ Готово." });
+
+      // НЕ пишем "Готово." — просто публикуем новое сообщение баланса
+      await postBalance(buildBalanceText(st, "✅ Установлен общий баланс."));
       return new Response("OK", { status: 200 });
     }
 
     if (text.startsWith("/setfood")) {
       if (threadId !== BALANCE_THREAD_ID) {
-        await tg("sendMessage", {
-          chat_id: chatId,
-          message_thread_id: threadId ?? undefined,
-          text: "Команду /setfood пиши в теме 'Баланс'.",
-        });
+        await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId ?? undefined, text: "Команду /setfood пиши в теме 'Баланс'." });
         return new Response("OK", { status: 200 });
       }
       const parts = text.split(/\s+/, 2);
@@ -227,13 +200,14 @@ export default {
       const st = await getState();
       st.food_cents = cents;
       await saveState(st);
-      await updateBalanceMessage(st, buildBalanceText(st.total_cents, st.food_cents, "✅ Установлен бюджет Еда."));
-      await tg("sendMessage", { chat_id: chatId, message_thread_id: BALANCE_THREAD_ID, text: "✅ Готово." });
+
+      // НЕ пишем "Готово." — просто публикуем новое сообщение баланса
+      await postBalance(buildBalanceText(st, "✅ Установлен бюджет Еда."));
       return new Response("OK", { status: 200 });
     }
 
     // --------------------------
-    // MAIN handler (как handle_message в main.py)
+    // MAIN handler (amounts)
     // --------------------------
     if (threadId == null) return new Response("OK", { status: 200 });
 
@@ -244,7 +218,7 @@ export default {
     const st = await getState();
     const when = nowStr();
 
-    // ЕДА: отдельный бюджет. Положительное — расход, отрицательное — пополнение еды.
+    // ЕДА: отдельный бюджет
     if (threadId === FOOD_THREAD_ID) {
       const old_food = st.food_cents;
       let new_food, direction, last;
@@ -263,12 +237,12 @@ export default {
       await saveState(st);
       await addEntry({ thread_id: threadId, category: "food", amount_cents: amount_abs, direction, note, created_at: when });
 
-      await updateBalanceMessage(st, buildBalanceText(st.total_cents, st.food_cents, last));
-      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "✅ Записал (Еда)." });
+      await postBalance(buildBalanceText(st, last));
+      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "Записал ✅" });
       return new Response("OK", { status: 200 });
     }
 
-    // ПОПОЛНЕНИЕ: положительное — доход в общий, отрицательное — расход из общего
+    // ПОПОЛНЕНИЕ: в общий
     if (threadId === TOPUP_THREAD_ID) {
       const old_total = st.total_cents;
       let new_total, direction, last;
@@ -287,12 +261,12 @@ export default {
       await saveState(st);
       await addEntry({ thread_id: threadId, category: "topup", amount_cents: amount_abs, direction, note, created_at: when });
 
-      await updateBalanceMessage(st, buildBalanceText(st.total_cents, st.food_cents, last));
-      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "✅ Записал (Пополнение)." });
+      await postBalance(buildBalanceText(st, last));
+      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "Записал ✅" });
       return new Response("OK", { status: 200 });
     }
 
-    // КВАРТИРА и прочие расходы: уменьшают общий (положительное — расход, отрицательное — возврат)
+    // КВАРТИРА и прочие расходы: общий
     if (threadId === APART_THREAD_ID || GENERAL_EXPENSE_THREADS.has(threadId)) {
       const category = threadId === APART_THREAD_ID ? "apart" : "total_other";
       const label = threadId === APART_THREAD_ID ? "🏠 <b>Квартира</b>" : "💰 <b>Расход</b>";
@@ -314,12 +288,12 @@ export default {
       await saveState(st);
       await addEntry({ thread_id: threadId, category, amount_cents: amount_abs, direction, note, created_at: when });
 
-      await updateBalanceMessage(st, buildBalanceText(st.total_cents, st.food_cents, last));
-      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "✅ Записал." });
+      await postBalance(buildBalanceText(st, last));
+      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "Записал ✅" });
       return new Response("OK", { status: 200 });
     }
 
-    // Неизвестная тема — игнор (как в main.py)
+    // Неизвестная тема — игнор
     return new Response("OK", { status: 200 });
   },
 };
