@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 import os
-TOKEN = os.getenv ("7994178151:AAGN7SFH2fFDMCx5TDZHFgWJ3nB8TdWRMV8")
+TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
 DB_PATH = "finance.db"
