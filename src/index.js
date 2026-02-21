@@ -13,6 +13,7 @@ export default {
     const FOOD_THREAD_ID = 33;    // тема "Еда"
     const APART_THREAD_ID = 78;   // тема "Квартира"
     const TOPUP_THREAD_ID = 80;   // тема "Пополнение"
+    const FOOD_TOPUP_THREAD_ID = 247; // тема "Пополнение еды" (влияет только на еду)
     const GENERAL_EXPENSE_THREADS = new Set([34, 43]); // Путешествия, Для нас и т.п.
 
     // --------------------------
@@ -266,6 +267,30 @@ export default {
       return new Response("OK", { status: 200 });
     }
 
+    //ПОПОЛНЕНИЕ: В ЕДУ
+    if (threadId === FOOD_TOPUP_THREAD_ID) {
+      const old_food = st.food_cents;
+      let new_food, direction, last;
+      
+      if (sign >= 0) { // пополнение еды
+        new_food = old_food + amount_abs;
+        direction = "in";
+        last = `🍽➕ <b>Пополнение еды</b>: ${money(old_food)} + ${money(amount_abs)} = <b>${money(new_food)}</b>\n📝 ${note}\n🕒 ${when}`;
+      } else {         // списание еды (если ввели отрицательное)
+        new_food = old_food - amount_abs;
+        direction = "out";
+        last = `🍽➖ <b>Списание еды</b>: ${money(old_food)} - ${money(amount_abs)} = <b>${money(new_food)}</b>\n📝 ${note}\n🕒 ${when}`;
+      }
+      
+      st.food_cents = new_food;
+      await saveState(st);
+      await addEntry({ thread_id: threadId, category: "food_topup", amount_cents: amount_abs, direction, note, created_at: when });
+      
+      await postBalance(buildBalanceText(st, last));
+      await tg("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: "Записал ✅" });
+      return new Response("OK", { status: 200 });
+    }
+    
     // КВАРТИРА и прочие расходы: общий
     if (threadId === APART_THREAD_ID || GENERAL_EXPENSE_THREADS.has(threadId)) {
       const category = threadId === APART_THREAD_ID ? "apart" : "total_other";
